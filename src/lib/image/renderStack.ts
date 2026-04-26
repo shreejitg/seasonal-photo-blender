@@ -1,4 +1,7 @@
-import { matchExposureToReference } from "./luminance";
+import {
+  type PerChannelStats,
+  matchAppearanceToReference,
+} from "./luminance";
 
 export type TransformState = {
   /** pixels from center */
@@ -72,7 +75,7 @@ export function buildComposite(
   order: { id: string; img: HTMLImageElement; t: TransformState }[],
   outW: number,
   outH: number,
-  options: { exposureToRef: number | null } | null
+  options: { refAppearance: PerChannelStats | null } | null
 ): ImageData {
   const n = order.length;
   if (n === 0) {
@@ -84,8 +87,8 @@ export function buildComposite(
   for (let k = 0; k < n; k++) {
     const { img, t } = order[k]!;
     let im = rasterizeLayer(img, t, outW, outH);
-    if (options?.exposureToRef != null) {
-      im = matchExposureToReference(im, options.exposureToRef).data;
+    if (options?.refAppearance != null) {
+      im = matchAppearanceToReference(im, options.refAppearance);
     }
     const src = im.data;
     const x0 = Math.floor((k * outW) / n);

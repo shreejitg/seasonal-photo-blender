@@ -24,7 +24,10 @@ import {
   rasterizeLayer,
   type TransformState,
 } from "@/lib/image/renderStack";
-import { meanLuminanceFromImageData as meanLuma } from "@/lib/image/luminance";
+import {
+  perChannelStatsFromImageData,
+  type PerChannelStats,
+} from "@/lib/image/luminance";
 import { photosPickerFetchPath } from "@/lib/photosPickerPath";
 import { loadWorkingSet, saveWorkingSet, type WorkingItem } from "@/lib/workingSet";
 import Link from "next/link";
@@ -123,10 +126,12 @@ function SortRow({
   item,
   selected,
   onSelect,
+  onRemove,
 }: {
   item: WorkingItem;
   selected: boolean;
   onSelect: () => void;
+  onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: item.id });
@@ -141,31 +146,48 @@ function SortRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={`flex cursor-grab items-center gap-2 rounded border px-2 py-2 text-sm active:cursor-grabbing ${
+      className={`flex touch-none select-none items-center gap-1 rounded border px-2 py-2 text-sm ${
+        isDragging ? "z-10 cursor-grabbing" : "cursor-grab"
+      } active:cursor-grabbing ${
         selected
           ? "border-amber-500/80 bg-amber-950/40"
           : "border-zinc-700 bg-zinc-900/60"
       }`}
+      {...attributes}
+      {...listeners}
     >
-      <button
-        type="button"
-        className="touch-none text-zinc-500"
-        {...attributes}
-        {...listeners}
-        aria-label="Drag"
+      <span
+        className="shrink-0 text-zinc-500"
+        aria-hidden
+        title="Drag to reorder"
       >
         ⋮⋮
-      </button>
+      </span>
       <button
         type="button"
         onClick={onSelect}
-        className="min-w-0 flex-1 truncate text-left text-zinc-200"
+        className="min-w-0 flex-1 cursor-grab truncate text-left text-zinc-200"
       >
         {item.name}
       </button>
       <span className="shrink-0 text-xs text-zinc-600">
         {new Date(item.imageTime).toLocaleDateString()}
       </span>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        className="shrink-0 -mr-0.5 flex h-7 w-7 cursor-pointer items-center justify-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-red-400"
+        aria-label={`Remove ${item.name} from working set`}
+        title="Remove"
+      >
+        <span className="text-lg leading-none" aria-hidden>
+          ×
+        </span>
+      </button>
     </li>
   );
 }
@@ -176,7 +198,7 @@ export function EditorView() {
   const [transforms, setTransforms] = useState<Record<string, TransformState>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [exposureRef, setExposureRef] = useState<"first" | "middle" | "last">("middle");
-  const [matchExposure, setMatchExposure] = useState(true);
+  const [matchAppearance, setMatchAppearance] = useState(true);
   const [maxSide, setMaxSide] = useState(1600);
   const [loaded, setLoaded] = useState<Map<string, HTMLImageElement> | null>(null);
   const [loading, setLoading] = useState(false);
@@ -195,7 +217,7 @@ export function EditorView() {
   selectedIdRef.current = selectedId;
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     })
@@ -292,8 +314,8 @@ export function EditorView() {
     const outW = maxSide;
     const outH = Math.max(1, Math.round(maxSide * ar));
 
-    let exposureToRef: number | null = null;
-    if (matchExposure && orderedLayers.length) {
+    let refAppearance: PerChannelStats | null = null;
+    if (matchAppearance && orderedLayers.length) {
       const rIdx =
         exposureRef === "first"
           ? 0
@@ -307,13 +329,13 @@ export function EditorView() {
         outW,
         outH
       );
-      exposureToRef = meanLuma(rIm);
+      refAppearance = perChannelStatsFromImageData(rIm);
     }
 
     return buildComposite(orderedLayers, outW, outH, {
-      exposureToRef: matchExposure ? exposureToRef : null,
+      refAppearance: matchAppearance ? refAppearance : null,
     });
-  }, [orderedLayers, maxSide, matchExposure, exposureRef]);
+  }, [orderedLayers, maxSide, matchAppearance, exposureRef]);
 
   useLayoutEffect(() => {
     const c = previewCanvasRef.current;
@@ -380,6 +402,25 @@ export function EditorView() {
       });
     }
   };
+
+  const removeLayer = useCallback(
+    (id: string) => {
+      const nextOrder = order.filter((x) => x !== id);
+      const nextItems = items.filter((x) => x.id !== id);
+      const reordered: WorkingItem[] = nextOrder
+        .map((iid) => nextItems.find((x) => x.id === iid))
+        .filter((x): x is WorkingItem => x != null);
+      saveWorkingSet(reordered);
+      setOrder(nextOrder);
+      setItems(nextItems);
+      setTransforms((tr) => {
+        const { [id]: _removed, ...rest } = tr;
+        return rest;
+      });
+      setSelectedId((cur) => (cur === id ? nextOrder[0] ?? null : cur));
+    },
+    [items, order]
+  );
 
   const updateSelected = (patch: Partial<TransformState>) => {
     if (!selectedId) return;
@@ -539,9 +580,10 @@ export function EditorView() {
       <div className="space-y-4">
         <h1 className="text-lg font-semibold text-white">Layer order & align</h1>
         <p className="text-xs text-zinc-500">
-          Drag to reorder. The preview is a <strong>horizontal strip blend</strong>: one
-          full-height column per layer, equal width, left → right (first in list = left).
-          Auto-align uses the <strong>first</strong> layer as the reference frame.
+          <strong>Drag and drop</strong> any row to reorder. The preview is a{" "}
+          <strong>horizontal strip blend</strong>: one full-height column per layer, equal
+          width, left → right (first in list = left). Auto-align uses the <strong>first</strong>{" "}
+          layer as the reference frame.
         </p>
         <DndContext
           sensors={sensors}
@@ -559,6 +601,7 @@ export function EditorView() {
                     item={it}
                     selected={selectedId === id}
                     onSelect={() => setSelectedId(id)}
+                    onRemove={() => removeLayer(id)}
                   />
                 );
               })}
@@ -600,12 +643,12 @@ export function EditorView() {
           <label className="flex items-center gap-2 text-xs text-zinc-400">
             <input
               type="checkbox"
-              checked={matchExposure}
-              onChange={(e) => setMatchExposure(e.target.checked)}
+              checked={matchAppearance}
+              onChange={(e) => setMatchAppearance(e.target.checked)}
             />
-            Match exposure to reference
+            Match brightness, contrast &amp; color to reference
           </label>
-          {matchExposure && (
+          {matchAppearance && (
             <label className="flex items-center gap-2 text-xs text-zinc-400">
               Reference layer
               <select
