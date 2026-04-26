@@ -22,7 +22,6 @@ import {
   buildComposite,
   imageDataToPngBlob,
   rasterizeLayer,
-  type BlendMode,
   type TransformState,
 } from "@/lib/image/renderStack";
 import { meanLuminanceFromImageData as meanLuma } from "@/lib/image/luminance";
@@ -49,6 +48,76 @@ const LAYER_SCALE_MAX = 3;
 
 const PREVIEW_ZOOM_MIN = 0.2;
 const PREVIEW_ZOOM_MAX = 4;
+
+type AlignStatus =
+  | { phase: "idle" }
+  | { phase: "fetch"; at: number; of: number }
+  | { phase: "api" }
+  | { phase: "apply" }
+  | { phase: "success"; layerCount: number; failedLayers: number[]; partialMessage?: string }
+  | { phase: "error"; message: string };
+
+function AutoAlignStatusBanner({ status, busy }: { status: AlignStatus; busy: boolean }) {
+  if (status.phase === "idle") return null;
+  const box = "rounded border px-3 py-2 text-xs leading-relaxed";
+  if (status.phase === "error") {
+    return (
+      <div
+        role="status"
+        aria-live="assertive"
+        className={`${box} border-amber-700/50 bg-amber-950/40 text-amber-100`}
+      >
+        <p className="font-medium text-amber-50/95">Auto-align did not complete</p>
+        <p className="mt-1 text-amber-200/90">{status.message}</p>
+      </div>
+    );
+  }
+  if (status.phase === "success") {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className={`${box} border-emerald-700/50 bg-emerald-950/35 text-emerald-100`}
+      >
+        <p className="font-medium text-emerald-50/95">Auto-align finished</p>
+        <p className="mt-1 text-emerald-200/90">
+          The align service returned successfully and the editor&rsquo;s transform values were
+          updated for this stack ({status.layerCount} layers; the first in the list is the
+          fixed reference and stays at identity).
+        </p>
+        {status.failedLayers.length > 0 && status.partialMessage ? (
+          <p className="mt-1.5 text-amber-200/90">{status.partialMessage}</p>
+        ) : null}
+      </div>
+    );
+  }
+  const line =
+    status.phase === "fetch"
+      ? `1 — Downloading full images: ${status.at} / ${status.of}…`
+      : status.phase === "api"
+        ? "2 — Request sent. Waiting for /api/align and the sidecar…"
+        : "3 — Applying returned values to transform sliders in the editor…";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={`${box} border-violet-600/40 bg-violet-950/40 text-violet-100`}
+    >
+      <div className="flex items-start gap-2.5">
+        {busy ? (
+          <span
+            className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-violet-300/20 border-t-violet-200"
+            aria-hidden
+          />
+        ) : null}
+        <div>
+          <p className="font-medium text-violet-50/95">Auto-align running</p>
+          <p className="mt-0.5 text-violet-200/90">{line}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function SortRow({
   item,
@@ -106,7 +175,6 @@ export function EditorView() {
   const [order, setOrder] = useState<string[]>([]);
   const [transforms, setTransforms] = useState<Record<string, TransformState>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [blendMode, setBlendMode] = useState<BlendMode>("mean");
   const [exposureRef, setExposureRef] = useState<"first" | "middle" | "last">("middle");
   const [matchExposure, setMatchExposure] = useState(true);
   const [maxSide, setMaxSide] = useState(1600);
@@ -123,7 +191,7 @@ export function EditorView() {
   } | null>(null);
   const [previewDragging, setPreviewDragging] = useState(false);
   const [alignBusy, setAlignBusy] = useState(false);
-  const [alignMessage, setAlignMessage] = useState<string | null>(null);
+  const [alignStatus, setAlignStatus] = useState<AlignStatus>({ phase: "idle" });
   selectedIdRef.current = selectedId;
 
   const sensors = useSensors(
@@ -242,10 +310,10 @@ export function EditorView() {
       exposureToRef = meanLuma(rIm);
     }
 
-    return buildComposite(orderedLayers, outW, outH, blendMode, {
+    return buildComposite(orderedLayers, outW, outH, {
       exposureToRef: matchExposure ? exposureToRef : null,
     });
-  }, [orderedLayers, maxSide, blendMode, matchExposure, exposureRef]);
+  }, [orderedLayers, maxSide, matchExposure, exposureRef]);
 
   useLayoutEffect(() => {
     const c = previewCanvasRef.current;
@@ -371,12 +439,13 @@ export function EditorView() {
   const runAutoAlign = async () => {
     if (!loaded || order.length < 1) return;
     setAlignBusy(true);
-    setAlignMessage(null);
     try {
       const form = new FormData();
       form.append("refIndex", "0");
       form.append("workWidth", String(maxSide));
-      for (const id of order) {
+      for (let i = 0; i < order.length; i++) {
+        const id = order[i]!;
+        setAlignStatus({ phase: "fetch", at: i + 1, of: order.length });
         const u = mediaUrl(id, true);
         const r = await fetch(u, { credentials: "include" });
         if (!r.ok) {
@@ -385,6 +454,7 @@ export function EditorView() {
         const blob = await r.blob();
         form.append("files", blob, "layer.jpg");
       }
+      setAlignStatus({ phase: "api" });
       const res = await fetch("/api/align", {
         method: "POST",
         body: form,
@@ -407,10 +477,17 @@ export function EditorView() {
         const msg = [j.error, j.hint].filter(Boolean).join(" ");
         throw new Error(msg || "Align request failed");
       }
+      if (!j.ok) {
+        throw new Error(j.error || "Align service returned not ok");
+      }
       const tlist = j.transforms;
       if (!tlist || tlist.length !== order.length) {
         throw new Error("Invalid align response");
       }
+      setAlignStatus({ phase: "apply" });
+      const failed = tlist
+        .map((t, i) => (t.error ? i : -1))
+        .filter((x) => x >= 0);
       setTransforms((prev) => {
         const next = { ...prev };
         for (let i = 0; i < order.length; i++) {
@@ -426,18 +503,20 @@ export function EditorView() {
         }
         return next;
       });
-      const failed = tlist
-        .map((t, i) => (t.error ? i : -1))
-        .filter((x) => x >= 0);
-      setAlignMessage(
-        failed.length
-          ? `Aligned others; could not match layer index(es): ${failed.map((i) => i + 1).join(", ")} (kept previous transforms for those).`
-          : "Applied ORB + RANSAC alignment (reference = first layer in list)."
-      );
+      setAlignStatus({
+        phase: "success",
+        layerCount: order.length,
+        failedLayers: failed.map((i) => i + 1),
+        partialMessage:
+          failed.length > 0
+            ? `Some layers could not be matched; previous transforms were kept for layer index(es): ${failed.map((i) => i + 1).join(", ")}.`
+            : undefined,
+      });
     } catch (e) {
-      setAlignMessage(
-        e instanceof Error ? e.message : "Auto-align failed"
-      );
+      setAlignStatus({
+        phase: "error",
+        message: e instanceof Error ? e.message : "Auto-align failed",
+      });
     } finally {
       setAlignBusy(false);
     }
@@ -460,10 +539,9 @@ export function EditorView() {
       <div className="space-y-4">
         <h1 className="text-lg font-semibold text-white">Layer order & align</h1>
         <p className="text-xs text-zinc-500">
-          Drag to reorder. For <strong>mean / max / gradient</strong>, bottom = back, top
-          = front. For <strong>horizontal strips</strong>, order is left → right (first
-          in list = left column). Auto-align uses the <strong>first</strong> layer as the
-          reference frame.
+          Drag to reorder. The preview is a <strong>horizontal strip blend</strong>: one
+          full-height column per layer, equal width, left → right (first in list = left).
+          Auto-align uses the <strong>first</strong> layer as the reference frame.
         </p>
         <DndContext
           sensors={sensors}
@@ -497,8 +575,8 @@ export function EditorView() {
                 <input
                   type="range"
                   className="w-full"
-                  min={key === "tx" || key === "ty" ? -200 : key === "rotDeg" ? -45 : LAYER_SCALE_MIN}
-                  max={key === "tx" || key === "ty" ? 200 : key === "rotDeg" ? 45 : LAYER_SCALE_MAX}
+                  min={key === "tx" ? -900 : key === "ty" ? -1000 : key === "rotDeg" ? -45 : LAYER_SCALE_MIN}
+                  max={key === "tx" ? 900 : key === "ty" ? 1000 : key === "rotDeg" ? 45 : LAYER_SCALE_MAX}
                   step={key === "scale" ? 0.01 : 1}
                   value={
                     (transforms[selectedId] || defaultTransform())[key] as number
@@ -515,20 +593,10 @@ export function EditorView() {
         )}
 
         <div className="space-y-2 rounded border border-zinc-800 p-3">
-          <h2 className="text-sm font-medium text-zinc-300">Blend</h2>
-          <label className="flex items-center gap-2 text-xs text-zinc-400">
-            Mode
-            <select
-              className="rounded border border-zinc-600 bg-zinc-900 px-2 py-1"
-              value={blendMode}
-              onChange={(e) => setBlendMode(e.target.value as BlendMode)}
-            >
-              <option value="mean">Mean (equal)</option>
-              <option value="gradient">Gradient weights (earlier = lighter)</option>
-              <option value="max">Max (lighten stack)</option>
-              <option value="strips">Horizontal strips (1/n from each, left to right)</option>
-            </select>
-          </label>
+          <h2 className="text-sm font-medium text-zinc-300">Strip composite</h2>
+          <p className="text-xs text-zinc-500">
+            Each layer is one column of the row; order is left to right.
+          </p>
           <label className="flex items-center gap-2 text-xs text-zinc-400">
             <input
               type="checkbox"
@@ -575,7 +643,7 @@ export function EditorView() {
             className="rounded border border-violet-500/50 bg-violet-950/40 px-4 py-2 text-sm text-violet-200 hover:bg-violet-900/50 disabled:opacity-50"
             title="Requires ALIGN_SERVICE_URL and the Python sidecar; see sidecar/README.md"
           >
-            {alignBusy ? "Aligning…" : "Auto-align layers (ORB)"}
+            {alignBusy ? "Auto-align…" : "Auto-align layers"}
           </button>
           <button
             type="button"
@@ -586,24 +654,15 @@ export function EditorView() {
             Download PNG
           </button>
         </div>
-        {alignMessage && (
-          <p
-            className={`text-xs ${
-              alignMessage.startsWith("Applied") || alignMessage.startsWith("Aligned")
-                ? "text-emerald-400/90"
-                : "text-amber-200/80"
-            }`}
-          >
-            {alignMessage}
-          </p>
-        )}
+        <AutoAlignStatusBanner status={alignStatus} busy={alignBusy} />
       </div>
 
       <div className="min-h-[320px] space-y-2">
         {loading && <p className="text-sm text-zinc-500">Loading full images…</p>}
         {previewData && (
           <div>
-            <p className="mb-1 text-xs text-zinc-500">
+            <AutoAlignStatusBanner status={alignStatus} busy={alignBusy} />
+            <p className="mb-1 mt-2 text-xs text-zinc-500">
               {selectedId ? (
                 <>
                   <strong>Drag</strong> on the preview to move the selected layer vertically.{" "}

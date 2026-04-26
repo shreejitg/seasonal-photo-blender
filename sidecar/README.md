@@ -9,8 +9,20 @@ cd sidecar
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # macOS / Linux
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
+
+### If `pip install` tries to **compile** numpy (Meson, “Unknown compiler cl/gcc” on Windows)
+
+That means pip could not use a **prebuilt wheel** (binary). Common causes:
+
+1. **Python 3.13** with an old `numpy<2` pin — there were no 3.13 wheels; this repo uses **numpy 2.x** so wheels install without a compiler. Upgrade pip first: `python -m pip install --upgrade pip`.
+2. **Unusual platform** — use 64-bit Python from [python.org](https://www.python.org/downloads/) (`win_amd64`).
+
+To **force** wheels only (fails fast if none exist):
+
+`pip install --only-binary :all: -r requirements.txt`
 
 ## Run
 

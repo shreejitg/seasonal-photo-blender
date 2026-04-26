@@ -10,8 +10,6 @@ export type TransformState = {
   scale: number;
 };
 
-export type BlendMode = "mean" | "gradient" | "max" | "strips";
-
 export function loadImageElement(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -69,11 +67,11 @@ export function rasterizeLayer(
   return ctx.getImageData(0, 0, outW, outH);
 }
 
+/** Horizontal strip composite: column k of n uses the k-th image (1/n width each, left to right). */
 export function buildComposite(
   order: { id: string; img: HTMLImageElement; t: TransformState }[],
   outW: number,
   outH: number,
-  mode: BlendMode,
   options: { exposureToRef: number | null } | null
 ): ImageData {
   const n = order.length;
@@ -81,91 +79,27 @@ export function buildComposite(
     return new ImageData(outW, outH);
   }
 
-  if (mode === "strips") {
-    const out = new ImageData(outW, outH);
-    const od = out.data;
-    for (let k = 0; k < n; k++) {
-      const { img, t } = order[k]!;
-      let im = rasterizeLayer(img, t, outW, outH);
-      if (options?.exposureToRef != null) {
-        im = matchExposureToReference(im, options.exposureToRef).data;
-      }
-      const src = im.data;
-      const x0 = Math.floor((k * outW) / n);
-      const x1 = k === n - 1 ? outW : Math.floor(((k + 1) * outW) / n);
-      for (let y = 0; y < outH; y++) {
-        const row = y * outW * 4;
-        for (let x = x0; x < x1; x++) {
-          const s = row + x * 4;
-          od[s] = src[s]!;
-          od[s + 1] = src[s + 1]!;
-          od[s + 2] = src[s + 2]!;
-          od[s + 3] = 255;
-        }
-      }
-    }
-    return out;
-  }
-
-  const acc = new Float32Array(outW * outH * 4);
-  const weights: number[] = Array.from({ length: n }, () => 1);
-  if (mode === "gradient" && n > 1) {
-    for (let i = 0; i < n; i++) {
-      weights[i] = i + 1;
-    }
-    const sum = weights.reduce((a, b) => a + b, 0) || 1;
-    for (let i = 0; i < n; i++) {
-      weights[i] = weights[i]! / sum;
-    }
-  } else {
-    for (let i = 0; i < n; i++) {
-      weights[i] = 1 / n;
-    }
-  }
-
-  for (let li = 0; li < n; li++) {
-    const { img, t } = order[li]!;
+  const out = new ImageData(outW, outH);
+  const od = out.data;
+  for (let k = 0; k < n; k++) {
+    const { img, t } = order[k]!;
     let im = rasterizeLayer(img, t, outW, outH);
     if (options?.exposureToRef != null) {
-      const { data } = matchExposureToReference(
-        im,
-        options.exposureToRef
-      );
-      im = data;
+      im = matchExposureToReference(im, options.exposureToRef).data;
     }
-    const w = mode === "max" ? 1 : weights[li]!;
-    const p = im.data;
-    for (let i = 0; i < acc.length; i += 4) {
-      if (mode === "max") {
-        acc[i] = Math.max(acc[i]!, p[i]!);
-        acc[i + 1] = Math.max(acc[i + 1]!, p[i + 1]!);
-        acc[i + 2] = Math.max(acc[i + 2]!, p[i + 2]!);
-        acc[i + 3] = 255;
-      } else {
-        acc[i] += p[i]! * w;
-        acc[i + 1] += p[i + 1]! * w;
-        acc[i + 2] += p[i + 2]! * w;
-        acc[i + 3] = 255;
+    const src = im.data;
+    const x0 = Math.floor((k * outW) / n);
+    const x1 = k === n - 1 ? outW : Math.floor(((k + 1) * outW) / n);
+    for (let y = 0; y < outH; y++) {
+      const row = y * outW * 4;
+      for (let x = x0; x < x1; x++) {
+        const s = row + x * 4;
+        od[s] = src[s]!;
+        od[s + 1] = src[s + 1]!;
+        od[s + 2] = src[s + 2]!;
+        od[s + 3] = 255;
       }
     }
-  }
-
-  const out = new ImageData(outW, outH);
-  const o = out.data;
-  if (mode === "max") {
-    for (let i = 0; i < o.length; i += 4) {
-      o[i] = acc[i]!;
-      o[i + 1] = acc[i + 1]!;
-      o[i + 2] = acc[i + 2]!;
-      o[i + 3] = 255;
-    }
-    return out;
-  }
-  for (let i = 0; i < o.length; i += 4) {
-    o[i] = Math.min(255, acc[i]!);
-    o[i + 1] = Math.min(255, acc[i + 1]!);
-    o[i + 2] = Math.min(255, acc[i + 2]!);
-    o[i + 3] = 255;
   }
   return out;
 }
