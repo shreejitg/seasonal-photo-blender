@@ -7,9 +7,37 @@ main.py falls back to SIFT+ORB. Disable with env SPB_USE_LOFTR=0.
 from __future__ import annotations
 
 import os
+import ssl
 
 import cv2
 import numpy as np
+
+
+def _configure_ssl() -> None:
+    """
+    torch.hub downloads via urllib. Point HTTPS at certifi (env vars + default factory).
+    Do not use ssl.get_default_context()—some runtimes (e.g. certain embeds) omit it.
+    """
+    try:
+        import certifi
+
+        ca = certifi.where()
+        os.environ.setdefault("SSL_CERT_FILE", ca)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+        os.environ.setdefault("CURL_CA_BUNDLE", ca)
+        if hasattr(ssl, "create_default_context"):
+
+            def _https_ctx() -> ssl.SSLContext:
+                return ssl.create_default_context(cafile=ca)
+
+            ssl._create_default_https_context = _https_ctx  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+    except (OSError, ssl.SSLError, AttributeError, TypeError):
+        pass
+
+
+_configure_ssl()
 
 _LOFTR_IMPORT_OK = False
 try:  # pragma: no cover - import guard for minimal installs
@@ -21,7 +49,9 @@ except ImportError:
     torch = None  # type: ignore[assignment, misc]
     LoFTR = None  # type: ignore[assignment, misc]
 
+_LOFTR_FAIL_SENT = object()  # init failed; do not retry every request
 _LOFTR_MODEL: object | None = None
+_LOFTR_INIT_ERROR: str | None = None
 
 # Long side of LoFTR input; larger = better but slower + more RAM (CPU ok, GPU faster).
 LOFTR_MAX_SIDE = 840
@@ -38,15 +68,31 @@ def loftr_enabled() -> bool:
     return _LOFTR_IMPORT_OK and os.environ.get("SPB_USE_LOFTR", "1") != "0"
 
 
+def loftr_init_error() -> str | None:
+    """Set if LoFTR class failed to load weights (e.g. SSL, offline). Alignment falls back to SIFT."""
+    return _LOFTR_INIT_ERROR
+
+
 def get_loftr() -> object | None:
-    """Lazy-load once (downloads weights on first use)."""
-    global _LOFTR_MODEL
+    """Lazy-load once (downloads weights on first use). On failure, stays on SIFT+ORB."""
+    global _LOFTR_MODEL, _LOFTR_INIT_ERROR
     if not loftr_enabled():
         return None
-    if _LOFTR_MODEL is None and LoFTR is not None and torch is not None:
-        _LOFTR_MODEL = LoFTR(pretrained="outdoor")
-        _LOFTR_MODEL = _LOFTR_MODEL.eval()  # type: ignore[union-attr]
-    return _LOFTR_MODEL
+    if _LOFTR_MODEL is _LOFTR_FAIL_SENT:
+        return None
+    if _LOFTR_MODEL is not None:
+        return _LOFTR_MODEL
+    if LoFTR is None or torch is None:
+        return None
+    _configure_ssl()
+    try:
+        m = LoFTR(pretrained="outdoor")
+        _LOFTR_MODEL = m.eval()  # type: ignore[union-attr]
+        _LOFTR_INIT_ERROR = None
+    except Exception as e:  # noqa: BLE001 - surface SSL/offline/oom to logs and health
+        _LOFTR_MODEL = _LOFTR_FAIL_SENT
+        _LOFTR_INIT_ERROR = f"{type(e).__name__}: {e!s}"[:500]
+    return _LOFTR_MODEL if _LOFTR_MODEL is not _LOFTR_FAIL_SENT else None
 
 
 def match_loftr(
@@ -60,6 +106,9 @@ def match_loftr(
     """
     model = get_loftr()
     if model is None:
+        err = loftr_init_error()
+        if err:
+            return None, None, f"LoFTR init failed (using SIFT fallback): {err}"
         return None, None, "LoFTR disabled or not installed"
 
     if gray_ref.shape != gray_oth.shape:

@@ -8,3 +8,5 @@ opencv-python-headless==4.10.0.84
 # LoFTR deep matcher (optional fallback to SIFT+ORB if import fails). CPU ok; first align downloads weights.
 torch>=2.1.0
 kornia>=0.7.0
+# Fixes SSL: CERTIFICATE_VERIFY_FAILED on some Windows Python installs (torch.hub download).
+certifi>=2024.0.0

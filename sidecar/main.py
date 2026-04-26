@@ -14,7 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from deep_match import loftr_import_ok, loftr_enabled, match_loftr
+from deep_match import loftr_import_ok, loftr_enabled, loftr_init_error, match_loftr
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -362,6 +362,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "loftr": bool(loftr_import_ok()),
         "loftr_enabled": bool(loftr_enabled()),
+        "loftr_init_error": loftr_init_error(),
     }
 
 

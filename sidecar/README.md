@@ -24,7 +24,13 @@ python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-`requirements.txt` includes **PyTorch** and **Kornia** (large download). If you need to avoid them temporarily, you could maintain a local env without `torch`/`kornia`; the app will then use SIFT+ORB only.
+`requirements.txt` includes **PyTorch** and **Kornia** (large download) and **certifi** (so `torch.hub` can download LoFTR weights on Windows with a proper CA bundle). If you need to avoid them temporarily, you could maintain a local env without `torch`/`kornia`; the app will then use SIFT+ORB only.
+
+### `SSL: CERTIFICATE_VERIFY_FAILED` when LoFTR downloads weights
+
+1. Run `pip install certifi` (already in `requirements.txt`) and **restart the sidecar** so the process picks up the updated `deep_match` SSL setup.
+2. If it still fails: on Windows, run the **“Install certificates”** script that ships with the Python.org installer, or set `SSL_CERT_FILE` to your org’s root CA.
+3. If LoFTR init fails, alignment **automatically uses SIFT+ORB**; `GET /health` includes `loftr_init_error` with the last error message. To force SIFT+ORB only, set `SPB_USE_LOFTR=0`.
 
 ### If `pip install` tries to **compile** numpy (Meson, no compiler on Windows)
 
