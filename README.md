@@ -21,7 +21,7 @@ flowchart TB
     G[Google Drive / Photos APIs]
   end
   subgraph sidecar [Local or private host]
-    CV[Python FastAPI: OpenCV align]
+    CV[Python FastAPI: LoFTR + OpenCV RANSAC/ECC]
   end
   UI --> Auth
   UI --> API
@@ -35,7 +35,7 @@ flowchart TB
 
 - **Client:** UI state (layer order, transforms, options) and the **working set** of image ids live in `sessionStorage` (see `src/lib/workingSet.ts`).
 - **Server:** OAuth secrets and tokens stay on the host; the app does **not** run OpenCV in the browser.
-- **Align service:** A **optional** **Python** sidecar (`sidecar/`) runs **SIFT/ORB + RANSAC + ECC** and returns per-layer **similarity** parameters. The Next route `POST /api/align` **requires sign-in** and only **proxies** to `ALIGN_SERVICE_URL` (it never exposes your sidecar publicly without you putting it behind the same trust boundary).
+- **Align service:** A **optional** **Python** sidecar (`sidecar/`) uses **Kornia LoFTR** for dense matches when `torch` + `kornia` are installed, else **SIFT+ORB**, then **RANSAC** and optional **gradient ECC**; it returns per-layer **similarity** parameters. The Next route `POST /api/align` **requires sign-in** and only **proxies** to `ALIGN_SERVICE_URL` (it never exposes your sidecar publicly without you putting it behind the same trust boundary). `GET /health` on the sidecar reports `loftr` / `loftr_enabled`.
 
 ---
 
@@ -60,12 +60,13 @@ For each file, images are **letterboxed** to the work size (width = `work_width`
 
 The **left column** is the reference: `ref_index` defaults to `0` (form field `refIndex`), matching **first row in the list** = **left** in the strip.
 
-### Step 1 — Structure images and matches
+### Step 1 — Correspondence points: LoFTR (default) or SIFT+ORB (fallback)
 
-- **Grayscale** from letterboxed BGR.
-- A **structure** image blends **CLAHE**, **Sobel gradient magnitude**, and a bit of **Laplacian** so keypoints survive snow vs. sun vs. haze.
-- **SIFT** (Lowe **ratio** test, ratio ≈ 0.75) on **(structure, structure)** and **(CLAHE, CLAHE)**; **ORB** on structure; matches are **merged** and **deduplicated** at a small spatial quantization.
-- Feature locations use a downscaled long side (see `KEYPOINT_MAX_SIDE` in code), then RANSAC runs at **full** pixel scale via the scale-back factor `s_back`.
+**Deep matcher (preferred):** If `SPB_USE_LOFTR` is not set to `0` and the optional `torch` / `kornia` dependencies are available (`sidecar/requirements.txt`), each pair of letterboxed grays is resized to a common long-side cap (see `LOFTR_MAX_SIDE` in `sidecar/deep_match.py`), converted to a tensor batch, and passed through **LoFTR** with **outdoor** pre-trained weights. The network outputs matched pixel coordinates in the resized frame; they are rescaled to **full** letterbox resolution, optionally filtered by **match confidence** and downsampled to a max pair count for RANSAC speed. Pairs are interpreted as **other → ref** in the same sense as OpenCV RANSAC below.
+
+**Classic fallback (automatic):** If LoFTR is disabled, unavailable, or returns too few points, the code uses a **structure** image (CLAHE + **Sobel** gradient magnitude + **Laplacian**), then **SIFT** (Lowe **ratio** test, ≈ 0.75) on (structure, structure) and (CLAHE, CLAHE), **ORB** on structure, **merged** and **deduplicated** matches, with feature extraction on a downscaled long side (`KEYPOINT_MAX_SIDE`) and scale back to full resolution for RANSAC.
+
+The align response includes a per-layer `matcher` field: `"loftr"`, `"sift"`, or on failure `"none"`.
 
 ### Step 2 — RANSAC similarity
 
@@ -75,7 +76,7 @@ The **left column** is the reference: `ref_index` defaults to `0` (form field `r
 
 Inliers are subject to a **reprojection threshold** (see `RANSAC_THRESH`); at least `MIN_INLIERS` inliers are required or the layer fails for that align call.
 
-### Step 3 — Refinement (ECC) on gradient magnitudes (optional but typical)
+### Step 3 — Refinement (ECC) on gradient magnitudes
 
 - Build **unit-normalized** **gradient magnitudes** for ref and other (Sobel, magnitude).
 - **Mask:** the **top 12%** of the frame (sky band) is **excluded** so alignment keys off buildings/horizon.

@@ -5,3 +5,6 @@ python-multipart==0.0.17
 # numpy 2.1+ ships wheels for 3.9–3.13+ on win_amd64.
 numpy>=2.1.0,<3
 opencv-python-headless==4.10.0.84
+# LoFTR deep matcher (optional fallback to SIFT+ORB if import fails). CPU ok; first align downloads weights.
+torch>=2.1.0
+kornia>=0.7.0

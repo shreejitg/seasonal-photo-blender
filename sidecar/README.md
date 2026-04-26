@@ -1,6 +1,17 @@
-# Auto-align sidecar (Python + OpenCV)
+# Auto-align sidecar (Python)
 
-Estimates **similarity transforms** (translation, rotation, uniform scale) so each image lines up with a **reference** image. The app uses **ORB** features, **Hamming** matching, and **RANSAC** (`estimateAffinePartial2D`).
+Estimates a **global similarity** (translation, rotation, uniform scale) from each *other* image to the **reference** (left column in the app). The app receives `tx`, `ty`, `rotDeg`, `scale` and applies them in the editor.
+
+## What runs here
+
+1. **LoFTR** (Kornia) on grayscale pairs, when `torch` and `kornia` import successfully and `SPB_USE_LOFTR` is not `0` — see `deep_match.py`. First run can **download** outdoor weights.
+2. If that is skipped or returns too few points, **SIFT** + **ORB** on “structure” + CLAHE images (`main.py`).
+3. **RANSAC** `estimateAffinePartial2D` (partial affine = similarity) on correspondences.
+4. Optional **ECC** on gradient magnitudes (sky area masked) + projection to similarity + conversion to editor parameters.
+
+`GET /health` returns `status`, and whether **LoFTR** is importable and enabled: `loftr`, `loftr_enabled`.
+
+Set **`SPB_USE_LOFTR=0`** in the environment to force the classic SIFT+ORB path only (e.g. to debug or avoid torch).
 
 ## Setup (Windows / macOS / Linux)
 
@@ -13,16 +24,12 @@ python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-### If `pip install` tries to **compile** numpy (Meson, “Unknown compiler cl/gcc” on Windows)
+`requirements.txt` includes **PyTorch** and **Kornia** (large download). If you need to avoid them temporarily, you could maintain a local env without `torch`/`kornia`; the app will then use SIFT+ORB only.
 
-That means pip could not use a **prebuilt wheel** (binary). Common causes:
+### If `pip install` tries to **compile** numpy (Meson, no compiler on Windows)
 
-1. **Python 3.13** with an old `numpy<2` pin — there were no 3.13 wheels; this repo uses **numpy 2.x** so wheels install without a compiler. Upgrade pip first: `python -m pip install --upgrade pip`.
-2. **Unusual platform** — use 64-bit Python from [python.org](https://www.python.org/downloads/) (`win_amd64`).
-
-To **force** wheels only (fails fast if none exist):
-
-`pip install --only-binary :all: -r requirements.txt`
+1. This repo uses **numpy 2.1+** (wheels for Python 3.13 on win_amd64). Upgrade pip: `python -m pip install --upgrade pip`.
+2. To **force** wheels only: `pip install --only-binary :all: -r requirements.txt`
 
 ## Run
 
@@ -30,18 +37,18 @@ To **force** wheels only (fails fast if none exist):
 uvicorn main:app --host 127.0.0.1 --port 8765
 ```
 
-Default URL: `http://127.0.0.1:8765`. Check `GET /health` returns `{"status":"ok"}`.
+Default: `http://127.0.0.1:8765` — `GET /health` should report `"status": "ok"`. On CPU, the first request that runs LoFTR may be slow while weights load.
 
 ## Wire the Next.js app
 
-In `.env.local` (same folder as your app, not only `sidecar`):
+In `.env.local` at the **Next.js project root** (not only this folder):
 
 ```
 ALIGN_SERVICE_URL=http://127.0.0.1:8765
 ```
 
-Restart `next dev`. In the editor, use **Auto-align layers (ORB)**. The first layer in the list is the reference frame; `work_width` matches your **Max width** export setting.
+Restart `next dev` (or use `npm run dev:all` from the repo root to start both processes).
 
 ## Deploying
 
-Run the sidecar on a private host or in the same VPC as your app; point `ALIGN_SERVICE_URL` at that base URL (no trailing path; the app calls `POST /align`). Do not expose the service publicly without authentication in front of it.
+Run the sidecar on a private host or the same private network as your app; set `ALIGN_SERVICE_URL` to that base URL. Do not expose the align service to the public internet without additional authentication in front of it.

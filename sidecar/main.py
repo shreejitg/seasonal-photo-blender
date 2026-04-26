@@ -1,10 +1,11 @@
 """
 Auto-align: left column = reference (ref_index, default 0).
 
-Per non-reference layer: SIFT+ORB on structure (CLAHE + edges + Laplacian) and CLAHE
-gray → merged matches, Lowe ratio → RANSAC partial affine (similarity) → optional
-`findTransformECC` on gradient magnitudes (bottom 88% of frame, sky masked) → project
-affine to similarity → decompose to editor tx, ty, rotDeg, scale.
+Per non-reference layer: **LoFTR** (Kornia, if installed) for dense matches, else
+SIFT+ORB on structure (CLAHE + edges + Laplacian) + CLAHE gray → merged matches, Lowe
+ratio → RANSAC partial affine (similarity) → optional `findTransformECC` on gradient
+magnitudes (top 12% sky masked) → project affine to similarity → decompose to editor
+tx, ty, rotDeg, scale. Disable LoFTR with `SPB_USE_LOFTR=0`.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from deep_match import loftr_import_ok, loftr_enabled, match_loftr
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -304,13 +306,30 @@ def align_pair_to_ref(
     gray_other: np.ndarray,
     out_w: int,
     out_h: int,
-) -> tuple[dict[str, float] | None, int, str]:
-    s_ref, s_back = _resize_max_side(gray_ref, KEYPOINT_MAX_SIDE)
-    s_oth, _ = _resize_max_side(gray_other, KEYPOINT_MAX_SIDE)
+) -> tuple[dict[str, float] | None, int, str, str]:
+    """
+    Returns (transform | None, inlier_count, error_or_ok, matcher) where matcher is
+    "loftr" | "sift" on success, and on failure: ("", 0, reason, "none") or (..., "sift") if
+    classic path was attempted.
+    """
+    src_pts: np.ndarray | None = None
+    dst_pts: np.ndarray | None = None
+    matcher = "sift"
 
-    src_pts, dst_pts, reason = _collect_matches_resized(s_ref, s_oth, s_back)
+    if loftr_enabled() and loftr_import_ok():
+        src_pts, dst_pts, lreason = match_loftr(gray_ref, gray_other)
+        if src_pts is not None and lreason == "ok":
+            matcher = "loftr"
+        else:
+            src_pts, dst_pts = None, None
+
     if src_pts is None or dst_pts is None:
-        return None, 0, reason
+        s_ref, s_back = _resize_max_side(gray_ref, KEYPOINT_MAX_SIDE)
+        s_oth, _ = _resize_max_side(gray_other, KEYPOINT_MAX_SIDE)
+        src_pts, dst_pts, mreason = _collect_matches_resized(s_ref, s_oth, s_back)
+        matcher = "sift"
+        if src_pts is None or dst_pts is None:
+            return None, 0, mreason, "none"
 
     m_est, inliers = cv2.estimateAffinePartial2D(
         src_pts,
@@ -321,20 +340,29 @@ def align_pair_to_ref(
         confidence=0.999,
     )
     if m_est is None:
-        return None, 0, "RANSAC failed"
+        return None, 0, "RANSAC failed", "none"
     inlier_count = int(inliers.sum()) if inliers is not None else 0
     if inlier_count < MIN_INLIERS:
-        return None, inlier_count, f"only {inlier_count} inliers (need {MIN_INLIERS})"
+        return (
+            None,
+            inlier_count,
+            f"only {inlier_count} inliers (need {MIN_INLIERS})",
+            matcher,
+        )
 
     m_final = refine_ecc_on_gradient(gray_ref, gray_other, m_est)
     t = decompose_to_editor(m_final, out_w, out_h)
     t = _clamp_to_editor(t, out_w, out_h)
-    return t, inlier_count, "ok"
+    return t, inlier_count, "ok", matcher
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "loftr": bool(loftr_import_ok()),
+        "loftr_enabled": bool(loftr_enabled()),
+    }
 
 
 @app.post("/align")
@@ -379,10 +407,13 @@ async def align(
                     "scale": 1.0,
                     "inliers": None,
                     "note": "reference",
+                    "matcher": None,
                 }
             )
             continue
-        t, n_inl, reason = align_pair_to_ref(grays[ref_i], grays[i], out_w, out_h)
+        t, n_inl, reason, matcher = align_pair_to_ref(
+            grays[ref_i], grays[i], out_w, out_h
+        )
         if t is None:
             transforms.append(
                 {
@@ -392,10 +423,13 @@ async def align(
                     "scale": 1.0,
                     "inliers": 0,
                     "error": reason,
+                    "matcher": matcher,
                 }
             )
         else:
-            transforms.append({**t, "inliers": n_inl, "note": "aligned"})
+            transforms.append(
+                {**t, "inliers": n_inl, "note": "aligned", "matcher": matcher}
+            )
 
     return JSONResponse(
         {
