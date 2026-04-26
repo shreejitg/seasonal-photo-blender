@@ -1,10 +1,10 @@
 """
 Auto-align: left column = reference (ref_index, default 0).
 
-Pipeline per layer: optional phase correlation (translation prior on CLAHE) →
-SIFT+ORB on *structure* images (CLAHE + edges; lighting-invariant) → RANSAC similarity
-→ optional ECC on gradient magnitudes in the bottom 75% of the frame (ignore sky) to
-snap horizons/buildings, then project affine → similarity. Wider tx/ty caps vs fixed px.
+Per non-reference layer: SIFT+ORB on structure (CLAHE + edges + Laplacian) and CLAHE
+gray → merged matches, Lowe ratio → RANSAC partial affine (similarity) → optional
+`findTransformECC` on gradient magnitudes (bottom 88% of frame, sky masked) → project
+affine to similarity → decompose to editor tx, ty, rotDeg, scale.
 """
 from __future__ import annotations
 
